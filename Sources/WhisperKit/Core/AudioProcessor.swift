@@ -57,7 +57,7 @@ public protocol AudioProcessing {
     var relativeEnergyWindow: Int { get set }
 
     /// Starts recording audio from the specified input device, resetting the previous state
-    func startRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws
+    func startRecordingLive(inputDeviceID: DeviceID?, saveFile: Bool, filePath: String?, callback: (([Float]) -> Void)?) throws
 
     /// Pause recording
     func pauseRecording()
@@ -66,17 +66,18 @@ public protocol AudioProcessing {
     func stopRecording()
 
     /// Resume recording audio from the specified input device, appending to continuous `audioArray` after pause
-    func resumeRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws
+    func resumeRecordingLive(inputDeviceID: DeviceID?, saveFile: Bool, filePath: String?, callback: (([Float]) -> Void)?) throws
 }
 
 /// Overrideable default methods for AudioProcessing
 public extension AudioProcessing {
-    func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)?) throws {
-        try startRecordingLive(inputDeviceID: inputDeviceID, callback: callback)
+    func startRecordingLive(inputDeviceID: DeviceID? = nil, saveFile: Bool = false, filePath: String? = nil, callback: (([Float]) -> Void)?) throws {
+        
+        try startRecordingLive(inputDeviceID: inputDeviceID, saveFile: saveFile, filePath: filePath, callback: callback)
     }
 
-    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)?) throws {
-        try resumeRecordingLive(inputDeviceID: inputDeviceID, callback: callback)
+    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, saveFile: Bool = false, filePath: String? = nil, callback: (([Float]) -> Void)?) throws {
+        try resumeRecordingLive(inputDeviceID: inputDeviceID, saveFile: saveFile, filePath: filePath, callback: callback)
     }
 
     static func padOrTrimAudio(fromArray audioArray: [Float], startAt startIndex: Int = 0, toLength frameLength: Int = 480_000, saveSegment: Bool = false) -> MLMultiArray? {
@@ -614,7 +615,7 @@ public extension AudioProcessor {
         #endif
     }
 
-    func setupEngine(inputDeviceID: DeviceID? = nil) throws -> AVAudioEngine {
+    func setupEngine(inputDeviceID: DeviceID? = nil, saveFile: Bool, filePath: String?) throws -> AVAudioEngine {
         let audioEngine = AVAudioEngine()
         let inputNode = audioEngine.inputNode
 
@@ -639,6 +640,26 @@ public extension AudioProcessor {
         guard let converter = AVAudioConverter(from: nodeFormat, to: desiredFormat) else {
             throw WhisperError.audioProcessingFailed("Failed to create audio converter")
         }
+        
+        var recordingFile: AVAudioFile?
+        if saveFile, let path = filePath, let recordingPath = URL(string: path) {
+            let settings  =
+                [AVSampleRateKey: NSNumber(value: 16000),
+                AVFormatIDKey: NSNumber(value: kAudioFormatMPEG4AAC),
+                AVLinearPCMBitDepthKey: NSNumber(value: 16),
+                AVNumberOfChannelsKey: NSNumber(value: 1),
+                AVEncoderAudioQualityKey: NSNumber(value: AVAudioQuality.high.rawValue)
+            ];
+        
+            do {
+                recordingFile = try AVAudioFile(forWriting: recordingPath,
+                                                 settings: settings,
+                                                 commonFormat: inputFormat.commonFormat,
+                                                 interleaved: inputFormat.isInterleaved)
+            } catch {
+                Logging.error("Failed to init audio file: \(error)")
+            }
+        }
 
         let bufferSize = AVAudioFrameCount(minBufferLength) // 100ms - 400ms supported
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nodeFormat) { [weak self] (buffer: AVAudioPCMBuffer, _: AVAudioTime) in
@@ -652,7 +673,11 @@ public extension AudioProcessor {
                     return
                 }
             }
-
+            do {
+                try recordingFile?.write(from: buffer)
+            } catch {
+                Logging.error("Failed save file: \(error)")
+            }
             let newBufferArray = Self.convertBufferToArray(buffer: buffer)
             self.processBuffer(newBufferArray)
         }
@@ -669,13 +694,13 @@ public extension AudioProcessor {
         }
     }
 
-    func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
+    func startRecordingLive(inputDeviceID: DeviceID? = nil, saveFile: Bool = false, filePath: String? = nil, callback: (([Float]) -> Void)? = nil) throws {
         audioSamples = []
         audioEnergy = []
 
         try? setupAudioSessionForDevice()
 
-        audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
+        audioEngine = try setupEngine(inputDeviceID: inputDeviceID, saveFile: saveFile, filePath: filePath)
 
         // Set the callback
         audioBufferCallback = callback
@@ -683,13 +708,13 @@ public extension AudioProcessor {
         lastInputDevice = inputDeviceID
     }
 
-    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
+    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, saveFile: Bool = false, filePath: String? = nil, callback: (([Float]) -> Void)? = nil) throws {
         try? setupAudioSessionForDevice()
 
         if inputDeviceID == lastInputDevice {
             try audioEngine?.start()
         } else {
-            audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
+            audioEngine = try setupEngine(inputDeviceID: inputDeviceID, saveFile: saveFile, filePath: filePath)
         }
 
         // Set the callback only if the provided callback is not nil
